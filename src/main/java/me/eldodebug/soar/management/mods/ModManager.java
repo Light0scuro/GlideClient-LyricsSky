@@ -80,6 +80,7 @@ public class ModManager {
 		mods.add(new KeystrokesMod());
 		mods.add(new KillEffectsMod());
 		mods.add(new KillSoundsMod());
+		mods.add(new LyricsSkyMod());
 		mods.add(new MechvibesMod());
 		mods.add(new MemoryUsageMod());
 		mods.add(new MinemenMod());
