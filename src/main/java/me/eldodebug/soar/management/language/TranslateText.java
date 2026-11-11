@@ -150,7 +150,13 @@ public enum TranslateText {
 	UI_SOUNDS("text.ui.sounds"), UI_SOUNDS_DESCRIPTION("text.ui.sounds.description") ,EXIT_WORLD_SINGLEPLAYER("text.gamemenu.exitworldsingleplayer"), OPEN_MOD_MENU("text.gamemenu.openglidemenu"), EDIT_HUD("text.gamemenu.edithud"), GRADIENT_SIMPLE("text.gradientsimple"), GENERAL("text.general"),  GENERAL_DESCRIPTION("text.general.description"),
 	UI_BLUR("text.ui.blur"), MC_FONT("text.hud.mcfont"), CHANGELOG("text.changelog"), NEWS("text.news"), SEARCH("text.search"),
 	LYRICS_SKY("text.lyricssky.name"), LYRICS_SKY_DESCRIPTION("text.lyricssky.description"), LINES_SHOWN("text.lyricssky.lines"), TIMING_OFFSET("text.lyricssky.offset"),
-	CURRENT_LINE_COLOR("text.lyricssky.currentcolor"), OTHER_LINES_COLOR("text.lyricssky.othercolor"), FOLLOW_VIEW("text.lyricssky.follow");
+	CURRENT_LINE_COLOR("text.lyricssky.currentcolor"), OTHER_LINES_COLOR("text.lyricssky.othercolor"), FOLLOW_VIEW("text.lyricssky.follow"),
+	LYRICS_STYLE("text.lyricssky.style"), LYRICS_STYLE_FLOATING("text.lyricssky.style.floating"), LYRICS_STYLE_PANEL("text.lyricssky.style.panel"),
+	LYRICS_FONT("text.lyricssky.font"), LYRICS_FONT_SEMIBOLD("text.lyricssky.font.semibold"), LYRICS_FONT_MEDIUM("text.lyricssky.font.medium"), LYRICS_FONT_REGULAR("text.lyricssky.font.regular"),
+	LYRICS_FONT_MOJANGLES("text.lyricssky.font.mojangles"), LYRICS_FONT_SANS("text.lyricssky.font.sans"), LYRICS_FONT_SERIF("text.lyricssky.font.serif"), LYRICS_FONT_MONO("text.lyricssky.font.mono"),
+	LYRICS_FONT_CUSTOM("text.lyricssky.font.custom"), LYRICS_CUSTOM_FONT("text.lyricssky.customfont"),
+	LYRICS_GRADIENT_START("text.lyricssky.gradientstart"), LYRICS_GRADIENT_END("text.lyricssky.gradientend"), LYRICS_WORD_HIGHLIGHT("text.lyricssky.wordhighlight"),
+	LYRICS_SPREAD("text.lyricssky.spread"), LYRICS_FADE_TIME("text.lyricssky.fadetime"), LYRICS_TILT("text.lyricssky.tilt"), LYRICS_TOP_BAR("text.lyricssky.topbar");
 
 	private String key, text;
 
