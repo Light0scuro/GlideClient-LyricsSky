@@ -174,7 +174,7 @@ public final class LyricFonts {
 	private static final String RES = "/assets/minecraft/soar/fonts/";
 
 	/**
-	 * @param id     semibold, medium, regular, mojangles, sans, serif, mono oppure custom
+	 * @param id     poppins, montserrat, kanit, fredoka, unbounded, bebas, pacifico, caveat, semibold, medium, regular, mojangles, sans, serif, mono oppure custom
 	 * @param custom per "custom": nome di un file nella cartella dei font, un percorso, oppure il nome di un font installato
 	 */
 	public static Font load(String id, String custom, File fontsDir) {
@@ -204,11 +204,7 @@ public final class LyricFonts {
 				id = "semibold";
 			}
 
-			String path = id.equals("medium") ? "inter/Inter-Medium.ttf"
-					: id.equals("regular") ? "inter/Inter-Regular.ttf"
-							: id.equals("mojangles") ? "mojangles.ttf" : "inter/Inter-SemiBold.ttf";
-
-			InputStream in = LyricFonts.class.getResourceAsStream(RES + path);
+			InputStream in = LyricFonts.class.getResourceAsStream(RES + pathFor(id));
 
 			try {
 				return Font.createFont(Font.TRUETYPE_FONT, in);
@@ -217,6 +213,24 @@ public final class LyricFonts {
 			}
 		} catch (Exception e) {
 			return new Font(Font.SANS_SERIF, Font.PLAIN, 1);
+		}
+	}
+
+	private static String pathFor(String id) {
+
+		switch (id) {
+		case "poppins": return "lyrics/Poppins-SemiBold.ttf";
+		case "montserrat": return "lyrics/Montserrat-SemiBold.ttf";
+		case "kanit": return "lyrics/Kanit-SemiBold.ttf";
+		case "fredoka": return "lyrics/Fredoka-SemiBold.ttf";
+		case "unbounded": return "lyrics/Unbounded-SemiBold.ttf";
+		case "bebas": return "lyrics/BebasNeue-Regular.ttf";
+		case "pacifico": return "lyrics/Pacifico-Regular.ttf";
+		case "caveat": return "lyrics/Caveat-Bold.ttf";
+		case "medium": return "inter/Inter-Medium.ttf";
+		case "regular": return "inter/Inter-Regular.ttf";
+		case "mojangles": return "mojangles.ttf";
+		default: return "inter/Inter-SemiBold.ttf";
 		}
 	}
 

@@ -21,11 +21,16 @@ public final class LyricLine {
 	 */
 	public float[] endFrac;
 
-	// layout con il font grande (stile "Fluttuante"), valido finche' l'epoca dei font non cambia
+	// layout con il font grande, a capo quando supera il limite di larghezza; valido finche' l'epoca dei font
+	// e il limite non cambiano
 	public LyricFonts.Word[] bigWords;
 	public float[] bigX;
-	public float bigTotal;
+	public int[] bigRow;
+	public float[] rowW;
+	public int rows;
+	public float maxRowW;
 	private int bigEpoch = -1;
+	private float bigLimit = -1f;
 
 	public LyricLine(long timeMs, String text) {
 		this.timeMs = timeMs;
@@ -62,12 +67,12 @@ public final class LyricLine {
 		endFrac = end;
 	}
 
-	/** Prepara parole e posizioni per il font grande. Va chiamato dal thread di rendering. */
-	public void prepare(LyricFonts fonts) {
+	/** Prepara parole e posizioni per il font grande, andando a capo oltre rowLimit pixel. Solo dal thread di rendering. */
+	public void prepare(LyricFonts fonts, float rowLimit) {
 
 		ensureWords();
 
-		if (bigEpoch == fonts.epoch) {
+		if (bigEpoch == fonts.epoch && bigLimit == rowLimit) {
 			return;
 		}
 
@@ -76,20 +81,36 @@ public final class LyricLine {
 		if (bigWords == null || bigWords.length != n) {
 			bigWords = new LyricFonts.Word[n];
 			bigX = new float[n];
+			bigRow = new int[n];
+			rowW = new float[n];
 		}
 
 		float space = fonts.space(LyricFonts.BIG);
 		float x = 0f;
+		int row = 0;
+		maxRowW = 1f;
 
 		for (int k = 0; k < n; k++) {
 
 			LyricFonts.Word w = fonts.get(LyricFonts.BIG, words[k]);
+
+			if (x > 0f && x + w.adv > rowLimit) {
+				rowW[row] = x - space;
+				maxRowW = Math.max(maxRowW, rowW[row]);
+				row++;
+				x = 0f;
+			}
+
 			bigWords[k] = w;
+			bigRow[k] = row;
 			bigX[k] = x;
 			x += w.adv + space;
 		}
 
-		bigTotal = Math.max(1f, x - space);
+		rowW[row] = Math.max(1f, x - space);
+		maxRowW = Math.max(maxRowW, rowW[row]);
+		rows = row + 1;
 		bigEpoch = fonts.epoch;
+		bigLimit = rowLimit;
 	}
 }

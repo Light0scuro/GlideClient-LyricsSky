@@ -156,7 +156,17 @@ public enum TranslateText {
 	LYRICS_FONT_MOJANGLES("text.lyricssky.font.mojangles"), LYRICS_FONT_SANS("text.lyricssky.font.sans"), LYRICS_FONT_SERIF("text.lyricssky.font.serif"), LYRICS_FONT_MONO("text.lyricssky.font.mono"),
 	LYRICS_FONT_CUSTOM("text.lyricssky.font.custom"), LYRICS_CUSTOM_FONT("text.lyricssky.customfont"),
 	LYRICS_GRADIENT_START("text.lyricssky.gradientstart"), LYRICS_GRADIENT_END("text.lyricssky.gradientend"), LYRICS_WORD_HIGHLIGHT("text.lyricssky.wordhighlight"),
-	LYRICS_SPREAD("text.lyricssky.spread"), LYRICS_FADE_TIME("text.lyricssky.fadetime"), LYRICS_TILT("text.lyricssky.tilt"), LYRICS_TOP_BAR("text.lyricssky.topbar");
+	LYRICS_SPREAD("text.lyricssky.spread"), LYRICS_FADE_TIME("text.lyricssky.fadetime"), LYRICS_TILT("text.lyricssky.tilt"), LYRICS_TOP_BAR("text.lyricssky.topbar"),
+	LYRICS_WHERE("text.lyricssky.where"), LYRICS_WHERE_SKY("text.lyricssky.where.sky"), LYRICS_WHERE_FLOATING("text.lyricssky.where.floating"), LYRICS_WHERE_SCREEN("text.lyricssky.where.screen"),
+	LYRICS_SHOW("text.lyricssky.show"), LYRICS_SHOW_WORD("text.lyricssky.show.word"), LYRICS_SHOW_LINE("text.lyricssky.show.line"),
+	LYRICS_LOOK("text.lyricssky.look"), LYRICS_LOOK_LAVENDER("text.lyricssky.look.lavender"), LYRICS_LOOK_DREAMY("text.lyricssky.look.dreamy"), LYRICS_LOOK_FIGHT("text.lyricssky.look.fight"),
+	LYRICS_LOOK_COMIC("text.lyricssky.look.comic"), LYRICS_LOOK_SCRIPT("text.lyricssky.look.script"), LYRICS_LOOK_FIRE("text.lyricssky.look.fire"), LYRICS_LOOK_ICE("text.lyricssky.look.ice"),
+	LYRICS_LOOK_ROYAL("text.lyricssky.look.royal"), LYRICS_LOOK_CLEAN("text.lyricssky.look.clean"), LYRICS_LOOK_CUSTOM("text.lyricssky.look.custom"),
+	LYRICS_COLOR_MODE("text.lyricssky.colormode"), LYRICS_COLOR_GRADIENT("text.lyricssky.colormode.gradient"), LYRICS_COLOR_ONE("text.lyricssky.colormode.one"), LYRICS_COLOR_SKY("text.lyricssky.colormode.sky"),
+	LYRICS_CURVE("text.lyricssky.curve"), LYRICS_TITLE_CARD("text.lyricssky.titlecard"),
+	LYRICS_FONT_POPPINS("text.lyricssky.font.poppins"), LYRICS_FONT_MONTSERRAT("text.lyricssky.font.montserrat"), LYRICS_FONT_KANIT("text.lyricssky.font.kanit"), LYRICS_FONT_FREDOKA("text.lyricssky.font.fredoka"),
+	LYRICS_FONT_UNBOUNDED("text.lyricssky.font.unbounded"), LYRICS_FONT_BEBAS("text.lyricssky.font.bebas"), LYRICS_FONT_PACIFICO("text.lyricssky.font.pacifico"), LYRICS_FONT_CAVEAT("text.lyricssky.font.caveat"),
+	LYRICS_EXTRA_SOURCE("text.lyricssky.extrasource");
 
 	private String key, text;
 

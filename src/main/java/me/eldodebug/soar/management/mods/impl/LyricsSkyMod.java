@@ -10,7 +10,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.lwjgl.opengl.GL11;
 
 import me.eldodebug.soar.Glide;
-import me.eldodebug.soar.injection.interfaces.IMixinRenderManager;
 import me.eldodebug.soar.management.event.EventTarget;
 import me.eldodebug.soar.management.event.impl.EventRender2D;
 import me.eldodebug.soar.management.event.impl.EventRender3D;
@@ -21,7 +20,9 @@ import me.eldodebug.soar.management.mods.ModCategory;
 import me.eldodebug.soar.management.mods.impl.lyricsky.LyricFonts;
 import me.eldodebug.soar.management.mods.impl.lyricsky.LyricLine;
 import me.eldodebug.soar.management.mods.impl.lyricsky.LyricsProvider;
+import me.eldodebug.soar.management.mods.impl.lyricsky.SkyMath;
 import me.eldodebug.soar.management.mods.impl.lyricsky.SpotifyBridge;
+import me.eldodebug.soar.management.mods.impl.lyricsky.WordAnim;
 import me.eldodebug.soar.management.mods.settings.impl.BooleanSetting;
 import me.eldodebug.soar.management.mods.settings.impl.ColorSetting;
 import me.eldodebug.soar.management.mods.settings.impl.ComboSetting;
@@ -29,23 +30,21 @@ import me.eldodebug.soar.management.mods.settings.impl.NumberSetting;
 import me.eldodebug.soar.management.mods.settings.impl.TextSetting;
 import me.eldodebug.soar.management.mods.settings.impl.combo.Option;
 import me.eldodebug.soar.management.notification.NotificationType;
-import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.renderer.WorldRenderer;
-import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.MathHelper;
+import net.minecraft.util.Vec3;
 
 /**
- * Mostra le lyrics sincronizzate della canzone Spotify in ascolto.
- *
- * Stile "Fluttuante": ogni riga compare nel mondo davanti a te, ruotata a caso, con gradiente di colore
- * e la parola cantata che "salta fuori"; poi si allontana e sfuma. Stile "Pannello": blocco fisso nel cielo.
- * In piu' c'e' una barra karaoke in alto con la parola corrente evidenziata.
+ * Lyrics sincronizzate della canzone Spotify in ascolto, in tre modalita':
+ * Sky (scritte in grande nel cielo, sulla cupola attorno a te), Floating (davanti a te, sempre
+ * dove guardi) e Screen (sottotitoli sullo schermo). Parola per parola o a riga intera, con preset
+ * di stile, gradiente o colore che segue il cielo, scheda "now playing" e barra karaoke in alto.
  *
  * Ottimizzazione: rete e lettura di Spotify girano su thread separati; le parole sono texture in cache
  * (colori e gradiente sono solo colori dei vertici); nessuna allocazione per frame; si disegnano solo
@@ -55,64 +54,93 @@ public class LyricsSkyMod extends Mod {
 
 	private static final List<LyricLine> EMPTY = Collections.emptyList();
 
-	// stile pannello (font vanilla)
-	private static final float LINE_H = 11f;
-	private static final float PANEL_SCALE = 0.05f;
-	private static final float MAX_TEXT_W = 240f;
-	private static final double SCROLL_MS = 280.0;
-
-	// stile fluttuante (font a texture): unita' di mondo per pixel di raster
+	// unita' di mondo per pixel di raster del font grande
 	private static final float WORLD_PER_PX = 0.0105f;
-	private static final float MAX_LINE_PX = 900f;
-	private static final float DRIFT_BLOCKS = 3f;
+	private static final float ROW_LIMIT_SKY = 520f;
+	private static final float ROW_LIMIT_FLOAT = 460f;
+	private static final double CARD_SECS = 5.0;
 
-	private ComboSetting styleSetting = new ComboSetting(TranslateText.LYRICS_STYLE, this, TranslateText.LYRICS_STYLE_FLOATING, new ArrayList<Option>() {
-		private static final long serialVersionUID = 1L;
-		{
-			add(new Option(TranslateText.LYRICS_STYLE_FLOATING));
-			add(new Option(TranslateText.LYRICS_STYLE_PANEL));
+	/** Un preset di stile: font e due colori del gradiente. */
+	private static final class Look {
+
+		final TranslateText key;
+		final String font;
+		final float[] a = new float[3], b = new float[3];
+
+		Look(TranslateText key, String font, int ar, int ag, int ab, int br, int bg, int bb) {
+			this.key = key;
+			this.font = font;
+			a[0] = ar / 255f; a[1] = ag / 255f; a[2] = ab / 255f;
+			b[0] = br / 255f; b[1] = bg / 255f; b[2] = bb / 255f;
 		}
-	});
+	}
 
-	private NumberSetting distanceSetting = new NumberSetting(TranslateText.DISTANCE, this, 12, 5, 60, true);
-	private NumberSetting heightSetting = new NumberSetting(TranslateText.HEIGHT, this, 25, 0, 80, true);
-	private NumberSetting scaleSetting = new NumberSetting(TranslateText.SCALE, this, 1.0, 0.3, 3.0, false);
-	private NumberSetting linesSetting = new NumberSetting(TranslateText.LINES_SHOWN, this, 4, 1, 9, true);
-	private NumberSetting offsetSetting = new NumberSetting(TranslateText.TIMING_OFFSET, this, 0, -3000, 3000, true);
+	private static final Look[] LOOKS = {
+		new Look(TranslateText.LYRICS_LOOK_LAVENDER, "poppins", 255, 255, 255, 196, 181, 253),
+		new Look(TranslateText.LYRICS_LOOK_DREAMY, "caveat", 255, 255, 255, 251, 182, 206),
+		new Look(TranslateText.LYRICS_LOOK_FIGHT, "kanit", 94, 234, 212, 203, 213, 225),
+		new Look(TranslateText.LYRICS_LOOK_COMIC, "fredoka", 253, 224, 71, 244, 114, 182),
+		new Look(TranslateText.LYRICS_LOOK_SCRIPT, "pacifico", 244, 114, 182, 167, 139, 250),
+		new Look(TranslateText.LYRICS_LOOK_FIRE, "bebas", 253, 224, 71, 239, 68, 68),
+		new Look(TranslateText.LYRICS_LOOK_ICE, "montserrat", 224, 242, 254, 125, 211, 252),
+		new Look(TranslateText.LYRICS_LOOK_ROYAL, "unbounded", 167, 139, 250, 250, 204, 21),
+		new Look(TranslateText.LYRICS_LOOK_CLEAN, "medium", 255, 255, 255, 203, 213, 225)
+	};
 
-	private ComboSetting fontSetting = new ComboSetting(TranslateText.LYRICS_FONT, this, TranslateText.LYRICS_FONT_SEMIBOLD, new ArrayList<Option>() {
-		private static final long serialVersionUID = 1L;
-		{
-			add(new Option(TranslateText.LYRICS_FONT_SEMIBOLD));
-			add(new Option(TranslateText.LYRICS_FONT_MEDIUM));
-			add(new Option(TranslateText.LYRICS_FONT_REGULAR));
-			add(new Option(TranslateText.LYRICS_FONT_MOJANGLES));
-			add(new Option(TranslateText.LYRICS_FONT_SANS));
-			add(new Option(TranslateText.LYRICS_FONT_SERIF));
-			add(new Option(TranslateText.LYRICS_FONT_MONO));
-			add(new Option(TranslateText.LYRICS_FONT_CUSTOM));
+	private static ArrayList<Option> opts(TranslateText... keys) {
+
+		ArrayList<Option> list = new ArrayList<Option>();
+
+		for (TranslateText k : keys) {
+			list.add(new Option(k));
 		}
-	});
+
+		return list;
+	}
+
+	private ComboSetting whereSetting = new ComboSetting(TranslateText.LYRICS_WHERE, this, TranslateText.LYRICS_WHERE_SKY,
+			opts(TranslateText.LYRICS_WHERE_SKY, TranslateText.LYRICS_WHERE_FLOATING, TranslateText.LYRICS_WHERE_SCREEN));
+	private ComboSetting showSetting = new ComboSetting(TranslateText.LYRICS_SHOW, this, TranslateText.LYRICS_SHOW_WORD,
+			opts(TranslateText.LYRICS_SHOW_WORD, TranslateText.LYRICS_SHOW_LINE));
+	private BooleanSetting followSetting = new BooleanSetting(TranslateText.FOLLOW_VIEW, this, true);
+
+	private ComboSetting lookSetting = new ComboSetting(TranslateText.LYRICS_LOOK, this, TranslateText.LYRICS_LOOK_LAVENDER,
+			opts(TranslateText.LYRICS_LOOK_LAVENDER, TranslateText.LYRICS_LOOK_DREAMY, TranslateText.LYRICS_LOOK_FIGHT,
+					TranslateText.LYRICS_LOOK_COMIC, TranslateText.LYRICS_LOOK_SCRIPT, TranslateText.LYRICS_LOOK_FIRE,
+					TranslateText.LYRICS_LOOK_ICE, TranslateText.LYRICS_LOOK_ROYAL, TranslateText.LYRICS_LOOK_CLEAN,
+					TranslateText.LYRICS_LOOK_CUSTOM));
+	private ComboSetting fontSetting = new ComboSetting(TranslateText.LYRICS_FONT, this, TranslateText.LYRICS_FONT_POPPINS,
+			opts(TranslateText.LYRICS_FONT_POPPINS, TranslateText.LYRICS_FONT_MONTSERRAT, TranslateText.LYRICS_FONT_KANIT,
+					TranslateText.LYRICS_FONT_FREDOKA, TranslateText.LYRICS_FONT_UNBOUNDED, TranslateText.LYRICS_FONT_BEBAS,
+					TranslateText.LYRICS_FONT_PACIFICO, TranslateText.LYRICS_FONT_CAVEAT, TranslateText.LYRICS_FONT_SEMIBOLD,
+					TranslateText.LYRICS_FONT_MOJANGLES, TranslateText.LYRICS_FONT_SANS, TranslateText.LYRICS_FONT_SERIF,
+					TranslateText.LYRICS_FONT_MONO, TranslateText.LYRICS_FONT_CUSTOM));
 	private TextSetting customFontSetting = new TextSetting(TranslateText.LYRICS_CUSTOM_FONT, this, "");
 
-	private BooleanSetting gradientSetting = new BooleanSetting(TranslateText.GRADIENT, this, true);
+	private ComboSetting colorModeSetting = new ComboSetting(TranslateText.LYRICS_COLOR_MODE, this, TranslateText.LYRICS_COLOR_GRADIENT,
+			opts(TranslateText.LYRICS_COLOR_GRADIENT, TranslateText.LYRICS_COLOR_ONE, TranslateText.LYRICS_COLOR_SKY));
 	private ColorSetting gradientStartSetting = new ColorSetting(TranslateText.LYRICS_GRADIENT_START, this, new Color(167, 139, 250), false);
 	private ColorSetting gradientEndSetting = new ColorSetting(TranslateText.LYRICS_GRADIENT_END, this, new Color(94, 234, 212), false);
-	private ColorSetting currentColorSetting = new ColorSetting(TranslateText.CURRENT_LINE_COLOR, this, new Color(255, 255, 255), false);
 	private ColorSetting otherColorSetting = new ColorSetting(TranslateText.OTHER_LINES_COLOR, this, new Color(190, 190, 205), false);
-	private BooleanSetting wordHighlightSetting = new BooleanSetting(TranslateText.LYRICS_WORD_HIGHLIGHT, this, true);
 
-	private NumberSetting spreadSetting = new NumberSetting(TranslateText.LYRICS_SPREAD, this, 40, 10, 90, true);
-	private NumberSetting fadeSetting = new NumberSetting(TranslateText.LYRICS_FADE_TIME, this, 2.0, 0.5, 5.0, false);
-	private NumberSetting tiltSetting = new NumberSetting(TranslateText.LYRICS_TILT, this, 10, 0, 30, true);
+	private NumberSetting scaleSetting = new NumberSetting(TranslateText.SCALE, this, 1.4, 0.3, 4.0, false);
+	private NumberSetting distanceSetting = new NumberSetting(TranslateText.DISTANCE, this, 18, 5, 60, true);
+	private NumberSetting heightSetting = new NumberSetting(TranslateText.HEIGHT, this, 28, 0, 80, true);
+	private NumberSetting spreadSetting = new NumberSetting(TranslateText.LYRICS_SPREAD, this, 35, 10, 90, true);
+	private NumberSetting tiltSetting = new NumberSetting(TranslateText.LYRICS_TILT, this, 8, 0, 30, true);
+	private NumberSetting fadeSetting = new NumberSetting(TranslateText.LYRICS_FADE_TIME, this, 1.8, 0.5, 5.0, false);
+	private NumberSetting linesSetting = new NumberSetting(TranslateText.LINES_SHOWN, this, 3, 1, 6, true);
+	private NumberSetting offsetSetting = new NumberSetting(TranslateText.TIMING_OFFSET, this, 0, -3000, 3000, true);
 
-	private BooleanSetting backgroundSetting = new BooleanSetting(TranslateText.BACKGROUND, this, true);
+	private BooleanSetting curveSetting = new BooleanSetting(TranslateText.LYRICS_CURVE, this, true);
 	private BooleanSetting shadowSetting = new BooleanSetting(TranslateText.SHADOW, this, true);
-	private BooleanSetting followSetting = new BooleanSetting(TranslateText.FOLLOW_VIEW, this, true);
+	private BooleanSetting titleCardSetting = new BooleanSetting(TranslateText.LYRICS_TITLE_CARD, this, true);
+	private BooleanSetting extraSourceSetting = new BooleanSetting(TranslateText.LYRICS_EXTRA_SOURCE, this, true);
 	private BooleanSetting barSetting = new BooleanSetting(TranslateText.LYRICS_TOP_BAR, this, true);
 
 	private final SpotifyBridge bridge = new SpotifyBridge();
 	private final LyricFonts fonts = new LyricFonts();
+	private final WordAnim anim = new WordAnim();
 	private final AtomicInteger generation = new AtomicInteger();
 
 	private volatile List<LyricLine> lyrics = EMPTY;
@@ -120,29 +148,27 @@ public class LyricsSkyMod extends Mod {
 
 	private String currentKey = "";
 	private int lineIndex;
+	private long cardStartNano;
 
-	// font attuale (per accorgersi dei cambi senza allocare)
-	private TranslateText lastFontOpt;
-	private String lastCustom = "";
+	private String lastFontId = "", lastCustom = "";
 
-	// stile pannello
-	private float panelYaw, panelHalfW;
-	private boolean panelInit;
-	private long lastFrameNano;
-
-	// stile fluttuante: posizioni delle righe, riusate (nessuna allocazione per frame)
+	// posizioni delle righe nel cielo, riusate (nessuna allocazione per frame)
 	private static final class Placement {
 		int idx = -1;
-		double ax, ay, az;
-		float dirX, dirZ, faceYaw, facePitch, tiltY, tiltX, roll, size;
+		float yawRel, yawAbs, elev, dist, roll, size;
 	}
 
 	private final Placement[] placements = new Placement[16];
 	private long rng = 0x9E3779B97F4A7C15L;
 
-	private final float[] gs = new float[3], ge = new float[3], cc = new float[3], un = new float[3];
+	private float skyYaw;
+	private boolean skyInit;
+	private long lastFrameNano;
 
-	// barra in alto
+	private final float[] gs = new float[3], ge = new float[3], un = new float[3], cl = new float[3], cr = new float[3];
+	private final float[] pos = new float[4];
+
+	// barra in alto e sottotitoli
 	private ScaledResolution scaled;
 	private int lastDW, lastDH, lastGui;
 	private String timeStr = "0:00";
@@ -179,8 +205,11 @@ public class LyricsSkyMod extends Mod {
 		// cartella dove l'utente puo' mettere i propri font (.ttf / .otf)
 		new File(Glide.getInstance().getFileManager().getGlideDir(), "fonts").mkdirs();
 
+		// cartella per i file .lrc personali ("Artista - Titolo.lrc"): hanno la precedenza sulle fonti online
+		new File(Glide.getInstance().getFileManager().getGlideDir(), "lyrics").mkdirs();
+
 		currentKey = "";
-		panelInit = false;
+		skyInit = false;
 		bridge.start();
 	}
 
@@ -194,14 +223,31 @@ public class LyricsSkyMod extends Mod {
 		lyrics = EMPTY;
 		currentKey = "";
 		fonts.clear();
+		resetPlacements();
+	}
+
+	private void resetPlacements() {
 
 		for (Placement p : placements) {
 			p.idx = -1;
 		}
 	}
 
-	private boolean isFloating() {
-		return styleSetting.getOption().getTranslate() == TranslateText.LYRICS_STYLE_FLOATING;
+	private TranslateText where() {
+		return whereSetting.getOption().getTranslate();
+	}
+
+	private Look currentLook() {
+
+		TranslateText k = lookSetting.getOption().getTranslate();
+
+		for (Look l : LOOKS) {
+			if (l.key == k) {
+				return l;
+			}
+		}
+
+		return null;
 	}
 
 	// ------------------------------------------------------------------ logica (tick)
@@ -231,15 +277,14 @@ public class LyricsSkyMod extends Mod {
 		currentKey = key;
 		lineIndex = 0;
 		lyrics = EMPTY;
-		panelInit = false;
-
-		for (Placement p : placements) {
-			p.idx = -1;
-		}
+		cardStartNano = System.nanoTime();
+		resetPlacements();
 
 		final int gen = generation.incrementAndGet();
 
-		LyricsProvider.fetch(s.artist, s.title, s.durationMs, new LyricsProvider.Callback() {
+		File lyricsDir = new File(Glide.getInstance().getFileManager().getGlideDir(), "lyrics");
+
+		LyricsProvider.fetch(s.artist, s.title, s.durationMs, lyricsDir, extraSourceSetting.isToggled(), new LyricsProvider.Callback() {
 			@Override
 			public void onResult(List<LyricLine> lines) {
 
@@ -256,25 +301,35 @@ public class LyricsSkyMod extends Mod {
 		});
 	}
 
+	private static String fontIdFor(TranslateText t) {
+
+		return t == TranslateText.LYRICS_FONT_MONTSERRAT ? "montserrat"
+				: t == TranslateText.LYRICS_FONT_KANIT ? "kanit"
+						: t == TranslateText.LYRICS_FONT_FREDOKA ? "fredoka"
+								: t == TranslateText.LYRICS_FONT_UNBOUNDED ? "unbounded"
+										: t == TranslateText.LYRICS_FONT_BEBAS ? "bebas"
+												: t == TranslateText.LYRICS_FONT_PACIFICO ? "pacifico"
+														: t == TranslateText.LYRICS_FONT_CAVEAT ? "caveat"
+																: t == TranslateText.LYRICS_FONT_SEMIBOLD ? "semibold"
+																		: t == TranslateText.LYRICS_FONT_MOJANGLES ? "mojangles"
+																				: t == TranslateText.LYRICS_FONT_SANS ? "sans"
+																						: t == TranslateText.LYRICS_FONT_SERIF ? "serif"
+																								: t == TranslateText.LYRICS_FONT_MONO ? "mono"
+																										: t == TranslateText.LYRICS_FONT_CUSTOM ? "custom" : "poppins";
+	}
+
 	private void updateFont() {
 
-		TranslateText opt = fontSetting.getOption().getTranslate();
+		Look look = currentLook();
+		String id = look != null ? look.font : fontIdFor(fontSetting.getOption().getTranslate());
 		String custom = customFontSetting.getText();
 
-		if (fonts.isReady() && opt == lastFontOpt && custom.equals(lastCustom)) {
+		if (fonts.isReady() && id.equals(lastFontId) && (!id.equals("custom") || custom.equals(lastCustom))) {
 			return;
 		}
 
-		lastFontOpt = opt;
+		lastFontId = id;
 		lastCustom = custom;
-
-		String id = opt == TranslateText.LYRICS_FONT_MEDIUM ? "medium"
-				: opt == TranslateText.LYRICS_FONT_REGULAR ? "regular"
-						: opt == TranslateText.LYRICS_FONT_MOJANGLES ? "mojangles"
-								: opt == TranslateText.LYRICS_FONT_SANS ? "sans"
-										: opt == TranslateText.LYRICS_FONT_SERIF ? "serif"
-												: opt == TranslateText.LYRICS_FONT_MONO ? "mono"
-														: opt == TranslateText.LYRICS_FONT_CUSTOM ? "custom" : "semibold";
 
 		File dir = new File(Glide.getInstance().getFileManager().getGlideDir(), "fonts");
 		fonts.configure(id + '|' + (id.equals("custom") ? custom : ""), LyricFonts.load(id, custom, dir));
@@ -315,68 +370,11 @@ public class LyricsSkyMod extends Mod {
 		return ls.get(0).timeMs > t ? -1 : lineIndex;
 	}
 
-	/** Durata "cantata" di una riga: fino alla successiva, al massimo 6 secondi. */
-	private static long spanOf(List<LyricLine> ls, int i) {
-
-		long start = ls.get(i).timeMs;
-		long next = i + 1 < ls.size() ? ls.get(i + 1).timeMs : start + 4000L;
-		return Math.max(300L, Math.min(next - start, 6000L));
-	}
-
-	/** Indice della parola in corso: -1 prima dell'inizio, numero di parole se la riga e' finita. */
-	private static int currentWord(LyricLine l, double prog) {
-
-		if (prog < 0) {
-			return -1;
-		}
-
-		for (int k = 0; k < l.words.length; k++) {
-			if (prog <= l.endFrac[k]) {
-				return k;
-			}
-		}
-
-		return l.words.length;
-	}
-
-	// ------------------------------------------------------------------ rendering 3D
-
-	@EventTarget
-	public void onRender3D(EventRender3D event) {
-
-		SpotifyBridge.Snapshot s = bridge.get();
-		List<LyricLine> ls = lyrics;
-		Entity view = mc.getRenderViewEntity();
-
-		if (s == null || ls.isEmpty() || mc.theWorld == null || view == null || mc.gameSettings.hideGUI) {
-			return;
-		}
-
-		long now = System.nanoTime();
-		double t = songTime(s, now);
-		int cur = advanceIndex(ls, t);
-
-		if (isFloating()) {
-
-			if (fonts.isReady()) {
-				drawFloating(ls, t, event.getPartialTicks(), view);
-			}
-		} else {
-			drawPanel(ls, t, cur, event.getPartialTicks(), view, now);
-		}
-	}
-
-	// ---- stile fluttuante
-
 	private float rand() {
 		rng ^= rng << 13;
 		rng ^= rng >>> 7;
 		rng ^= rng << 17;
 		return (rng >>> 40) / 16777216f;
-	}
-
-	private static float clamp01(float v) {
-		return v < 0f ? 0f : (v > 1f ? 1f : v);
 	}
 
 	private static float lerp(float a, float b, float t) {
@@ -389,205 +387,50 @@ public class LyricsSkyMod extends Mod {
 		dst[2] = c.getBlue() / 255f;
 	}
 
-	private void spawn(Placement p, int idx, Entity view, float pt, RenderManager rm, IMixinRenderManager im) {
+	/** Colori della frame: gradiente (da preset o da impostazioni), colore unico o colore del cielo. */
+	private void prepareColors(float pt, Entity view) {
 
-		p.idx = idx;
+		Look look = currentLook();
 
-		float sign = (idx & 1) == 0 ? 1f : -1f;
-		float yawOff = sign * (0.3f + 0.7f * rand()) * spreadSetting.getValueFloat();
-		float elev = heightSetting.getValueFloat() + (rand() - 0.5f) * 14f;
-		float dist = distanceSetting.getValueFloat() * (0.8f + 0.45f * rand());
+		if (look != null) {
+			System.arraycopy(look.a, 0, gs, 0, 3);
+			System.arraycopy(look.b, 0, ge, 0, 3);
+		} else {
+			load(gs, gradientStartSetting.getColor());
+			load(ge, gradientEndSetting.getColor());
+		}
 
-		float yaw = view.prevRotationYaw + MathHelper.wrapAngleTo180_float(view.rotationYaw - view.prevRotationYaw) * pt + yawOff;
-		double yr = Math.toRadians(yaw), er = Math.toRadians(elev), ce = Math.cos(er);
+		TranslateText mode = colorModeSetting.getOption().getTranslate();
 
-		p.dirX = (float) -Math.sin(yr);
-		p.dirZ = (float) Math.cos(yr);
-		p.ax = im.getRenderPosX() + p.dirX * ce * dist;
-		p.ay = im.getRenderPosY() + view.getEyeHeight() + Math.sin(er) * dist;
-		p.az = im.getRenderPosZ() + p.dirZ * ce * dist;
+		if (mode == TranslateText.LYRICS_COLOR_ONE) {
+			System.arraycopy(gs, 0, ge, 0, 3);
+		} else if (mode == TranslateText.LYRICS_COLOR_SKY && mc.theWorld != null) {
 
-		// la riga guarda verso dove stava la camera quando e' nata, con una inclinazione casuale
-		p.faceYaw = rm.playerViewY;
-		p.facePitch = rm.playerViewX * (mc.gameSettings.thirdPersonView == 2 ? -1f : 1f);
+			// tinta chiara del colore del cielo, cosi' il testo "si intona" con l'ora e il bioma
+			Vec3 sky = mc.theWorld.getSkyColor(view, pt);
+			gs[0] = lerp((float) sky.xCoord, 1f, 0.72f);
+			gs[1] = lerp((float) sky.yCoord, 1f, 0.72f);
+			gs[2] = lerp((float) sky.zCoord, 1f, 0.72f);
 
-		float tilt = tiltSetting.getValueFloat();
-		p.roll = (rand() - 0.5f) * 2f * tilt;
-		p.tiltY = (rand() - 0.5f) * 2f * tilt * 1.6f;
-		p.tiltX = (rand() - 0.5f) * 2f * tilt * 0.6f;
-		p.size = 0.85f + 0.5f * rand();
-	}
+			for (int i = 0; i < 3; i++) {
+				ge[i] = lerp(gs[i], 1f, 0.3f);
+			}
+		}
 
-	private void drawFloating(List<LyricLine> ls, double t, float pt, Entity view) {
-
-		int n = ls.size();
-		int lo = Math.max(0, lineIndex - linesSetting.getValueInt() + 1);
-		int hi = Math.min(n - 1, lineIndex + 1);
-		float fadeMs = fadeSetting.getValueFloat() * 1000f;
-
-		RenderManager rm = mc.getRenderManager();
-		IMixinRenderManager im = (IMixinRenderManager) rm;
-		double rx = im.getRenderPosX(), ry = im.getRenderPosY(), rz = im.getRenderPosZ();
-		float eye = view.getEyeHeight();
-
-		// direzione dello sguardo, per non disegnare cio' che sta dietro
-		float vYaw = view.prevRotationYaw + MathHelper.wrapAngleTo180_float(view.rotationYaw - view.prevRotationYaw) * pt;
-		float vPitch = view.prevRotationPitch + (view.rotationPitch - view.prevRotationPitch) * pt;
-		double cp = Math.cos(Math.toRadians(vPitch));
-		double vdx = -Math.sin(Math.toRadians(vYaw)) * cp;
-		double vdy = -Math.sin(Math.toRadians(vPitch));
-		double vdz = Math.cos(Math.toRadians(vYaw)) * cp;
-
-		boolean hl = wordHighlightSetting.isToggled();
-		boolean grad = gradientSetting.isToggled();
-		boolean shadow = shadowSetting.isToggled();
-		float userScale = scaleSetting.getValueFloat();
-
-		load(gs, gradientStartSetting.getColor());
-		load(ge, gradientEndSetting.getColor());
-		load(cc, currentColorSetting.getColor());
 		load(un, otherColorSetting.getColor());
+	}
 
-		boolean stateSet = false;
+	/** Colore di una parola in un punto del gradiente (f = 0..1 lungo la riga). */
+	private void gradColor(float[] dst, float f, float mix, float white) {
 
-		for (int i = lo; i <= hi; i++) {
-
-			LyricLine l = ls.get(i);
-			long start = l.timeMs;
-			long span = spanOf(ls, i);
-			double spanEnd = start + span;
-
-			if (t < start - 250.0 || t > spanEnd + fadeMs) {
-				continue;
-			}
-
-			Placement p = placements[i & 15];
-
-			if (p.idx != i) {
-				spawn(p, i, view, pt, rm, im);
-			}
-
-			double ax = p.ax - rx, ay = p.ay - ry, az = p.az - rz;
-
-			if (ax * vdx + (ay - eye) * vdy + az * vdz < 0.5) {
-				continue;
-			}
-
-			float fadeIn = clamp01((float) ((t - (start - 250.0)) / 350.0));
-			float fo = t > spanEnd ? clamp01((float) ((t - spanEnd) / fadeMs)) : 0f;
-			float alpha = (1f - (1f - fadeIn) * (1f - fadeIn)) * (1f - fo * fo);
-
-			if (alpha < 0.01f) {
-				continue;
-			}
-
-			// entrata con un piccolo rimbalzo, poi la riga rimpicciolisce e si allontana
-			float c1 = 1.70158f, c3 = c1 + 1f, f1 = fadeIn - 1f;
-			float life = (1f + c3 * f1 * f1 * f1 + c1 * f1 * f1) * (1f - 0.35f * fo);
-
-			l.prepare(fonts);
-
-			if (!stateSet) {
-				stateSet = true;
-				GlStateManager.enableTexture2D();
-				GlStateManager.disableLighting();
-				GlStateManager.disableDepth();
-				GlStateManager.depthMask(false);
-				GlStateManager.disableCull();
-				GlStateManager.enableBlend();
-				GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0);
-			}
-
-			float fit = l.bigTotal > MAX_LINE_PX ? MAX_LINE_PX / l.bigTotal : 1f;
-			float s = WORLD_PER_PX * userScale * p.size * life * fit;
-
-			GlStateManager.pushMatrix();
-			GlStateManager.translate((float) ax + p.dirX * fo * DRIFT_BLOCKS, (float) ay + fo * 1.2f, (float) az + p.dirZ * fo * DRIFT_BLOCKS);
-			GlStateManager.rotate(-(p.faceYaw + p.tiltY), 0f, 1f, 0f);
-			GlStateManager.rotate(p.facePitch + p.tiltX, 1f, 0f, 0f);
-			GlStateManager.rotate(p.roll, 0f, 0f, 1f);
-			GlStateManager.scale(-s, -s, s);
-
-			drawWords(l, t, start, span, alpha, hl, grad, shadow);
-
-			GlStateManager.popMatrix();
-		}
-
-		if (stateSet) {
-			GlStateManager.enableCull();
-			GlStateManager.depthMask(true);
-			GlStateManager.enableDepth();
-			GlStateManager.disableBlend();
-			GlStateManager.color(1f, 1f, 1f, 1f);
+		for (int i = 0; i < 3; i++) {
+			float c = lerp(gs[i], ge[i], f);
+			c = lerp(un[i], c, mix);
+			dst[i] = lerp(c, 1f, white);
 		}
 	}
 
-	private void drawWords(LyricLine l, double t, long start, double span, float alpha, boolean hl, boolean grad, boolean shadow) {
-
-		int nW = l.words.length;
-		float total = l.bigTotal;
-		float half = total / 2f;
-		int curWord = hl ? currentWord(l, (t - start) / span) : nW;
-
-		Tessellator tess = Tessellator.getInstance();
-		WorldRenderer wr = tess.getWorldRenderer();
-
-		for (int k = 0; k < nW; k++) {
-
-			LyricFonts.Word w = l.bigWords[k];
-			float ws = k == 0 ? 0f : l.endFrac[k - 1], we = l.endFrac[k];
-			double tWs = start + ws * span, tWe = start + we * span;
-
-			// emph: quanto la parola e' "in evidenza"; mix: da colore "non ancora cantata" a colore finale
-			float emph, mix;
-
-			if (!hl) {
-				emph = 0f;
-				mix = 1f;
-			} else if (k < curWord) {
-				emph = 1f - clamp01((float) ((t - tWe) / 220.0));
-				mix = 1f;
-			} else if (k == curWord) {
-				emph = clamp01((float) ((t - tWs) / 120.0));
-				mix = emph;
-			} else {
-				emph = 0f;
-				mix = 0f;
-			}
-
-			float e = emph * emph * (3f - 2f * emph);
-			float sc = 1f + 0.32f * e;
-			float white = 0.28f * e;
-
-			float fl = l.bigX[k] / total, fr = (l.bigX[k] + w.adv) / total;
-			float a = alpha * (0.78f + 0.22f * mix);
-
-			float rl, gl, bl, rr, gr, br;
-
-			if (grad) {
-				rl = lerp(gs[0], ge[0], fl); gl = lerp(gs[1], ge[1], fl); bl = lerp(gs[2], ge[2], fl);
-				rr = lerp(gs[0], ge[0], fr); gr = lerp(gs[1], ge[1], fr); br = lerp(gs[2], ge[2], fr);
-			} else {
-				rl = rr = cc[0]; gl = gr = cc[1]; bl = br = cc[2];
-			}
-
-			rl = lerp(lerp(un[0], rl, mix), 1f, white); gl = lerp(lerp(un[1], gl, mix), 1f, white); bl = lerp(lerp(un[2], bl, mix), 1f, white);
-			rr = lerp(lerp(un[0], rr, mix), 1f, white); gr = lerp(lerp(un[1], gr, mix), 1f, white); br = lerp(lerp(un[2], br, mix), 1f, white);
-
-			float cx = -half + l.bigX[k] + w.adv / 2f;
-			float hw = (w.adv / 2f + LyricFonts.PAD) * sc, hh = (w.h / 2f) * sc;
-
-			GlStateManager.bindTexture(w.tex);
-			wr.begin(7, DefaultVertexFormats.POSITION_TEX_COLOR);
-
-			if (shadow) {
-				quad(wr, cx - hw + 1.6f, -hh + 1.6f, cx + hw + 1.6f, hh + 1.6f, 0f, 0f, 0f, 0f, 0f, 0f, a * 0.5f);
-			}
-
-			quad(wr, cx - hw, -hh, cx + hw, hh, rl, gl, bl, rr, gr, br, a);
-			tess.draw();
-		}
-	}
+	// ------------------------------------------------------------------ disegno di una parola
 
 	private static void quad(WorldRenderer wr, float x0, float y0, float x1, float y1,
 			float rl, float gl, float bl, float rr, float gr, float br, float a) {
@@ -598,170 +441,445 @@ public class LyricsSkyMod extends Mod {
 		wr.pos(x1, y0, 0.0).tex(1.0, 0.0).color(rr, gr, br, a).endVertex();
 	}
 
-	// ---- stile pannello
+	/** Disegna una parola centrata in (cx, cy); sc = fattore di scala totale (testo -> unita' correnti). */
+	private void drawWord(Tessellator tess, WorldRenderer wr, LyricFonts.Word w, float cx, float cy, float sc,
+			float[] left, float[] right, float a, boolean shadow) {
 
-	private void drawPanel(List<LyricLine> ls, double t, int cur, float pt, Entity view, long now) {
+		float hw = (w.adv / 2f + LyricFonts.PAD) * sc, hh = w.h / 2f * sc;
 
-		int n = ls.size();
+		GlStateManager.bindTexture(w.tex);
+		wr.begin(7, DefaultVertexFormats.POSITION_TEX_COLOR);
 
-		// scorrimento morbido verso l'alto quando cambia riga
-		float slide = 0f;
-
-		if (cur >= 0) {
-
-			double since = t - ls.get(cur).timeMs;
-
-			if (since < SCROLL_MS) {
-				float inv = 1f - (float) (Math.max(0.0, since) / SCROLL_MS);
-				slide = inv * inv * inv;
-			}
+		if (shadow) {
+			float off = w.h * 0.045f * sc;
+			quad(wr, cx - hw + off, cy - hh + off * 1.3f, cx + hw + off, cy + hh + off * 1.3f, 0f, 0f, 0f, 0f, 0f, 0f, a * 0.5f);
 		}
 
-		float yaw = view.prevRotationYaw + MathHelper.wrapAngleTo180_float(view.rotationYaw - view.prevRotationYaw) * pt;
-		float dt = lastFrameNano == 0L ? 0f : Math.min(0.1f, (now - lastFrameNano) / 1.0E9f);
-		lastFrameNano = now;
+		quad(wr, cx - hw, cy - hh, cx + hw, cy + hh, left[0], left[1], left[2], right[0], right[1], right[2], a);
+		tess.draw();
+	}
 
-		if (!panelInit) {
-			panelYaw = yaw;
-			panelInit = true;
-		} else if (followSetting.isToggled()) {
-			panelYaw += MathHelper.wrapAngleTo180_float(yaw - panelYaw) * (1f - (float) Math.exp(-4f * dt));
-		}
+	// ------------------------------------------------------------------ rendering 3D (Sky e Floating)
 
-		// fuori dal campo visivo: non disegniamo nulla
-		if (Math.abs(MathHelper.wrapAngleTo180_float(yaw - panelYaw)) > 100f) {
-			return;
-		}
+	private void worldState() {
 
-		double yawRad = Math.toRadians(panelYaw);
-		double elRad = Math.toRadians(heightSetting.getValue());
-		double dist = distanceSetting.getValue();
-		double cosEl = Math.cos(elRad);
-
-		// l'origine del rendering e' ai piedi del giocatore: la camera sta all'altezza degli occhi
-		float dx = (float) (-Math.sin(yawRad) * cosEl * dist);
-		float dy = (float) (Math.sin(elRad) * dist) + view.getEyeHeight();
-		float dz = (float) (Math.cos(yawRad) * cosEl * dist);
-
-		int total = linesSetting.getValueInt();
-		int before = (total - 1) / 2;
-		int after = total - 1 - before;
-		int first = Math.max(0, cur - before);
-		int last = Math.min(n - 1, cur + after);
-
-		FontRenderer font = mc.fontRendererObj;
-		float maxW = 0f;
-
-		for (int i = first; i <= last; i++) {
-
-			LyricLine l = ls.get(i);
-
-			if (l.width < 0) {
-				l.width = font.getStringWidth(l.text);
-			}
-
-			maxW = Math.max(maxW, Math.min(l.width, MAX_TEXT_W));
-		}
-
-		float targetHalfW = maxW * 0.575f + 8f;
-		panelHalfW = panelHalfW == 0f ? targetHalfW : panelHalfW + (targetHalfW - panelHalfW) * (1f - (float) Math.exp(-8f * dt));
-
-		RenderManager rm = mc.getRenderManager();
-		float scale = PANEL_SCALE * scaleSetting.getValueFloat();
-		boolean shadow = shadowSetting.isToggled();
-		int curRgb = currentColorSetting.getColor().getRGB() & 0xFFFFFF;
-		int othRgb = otherColorSetting.getColor().getRGB() & 0xFFFFFF;
-
-		GlStateManager.pushMatrix();
-		GlStateManager.translate(dx, dy, dz);
-		GL11.glNormal3f(0f, 1f, 0f);
-		GlStateManager.rotate(-rm.playerViewY, 0f, 1f, 0f);
-		GlStateManager.rotate(rm.playerViewX * (mc.gameSettings.thirdPersonView == 2 ? -1f : 1f), 1f, 0f, 0f);
-		GlStateManager.scale(-scale, -scale, scale);
+		GlStateManager.enableTexture2D();
 		GlStateManager.disableLighting();
 		GlStateManager.disableDepth();
 		GlStateManager.depthMask(false);
+		GlStateManager.disableCull();
 		GlStateManager.enableBlend();
 		GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0);
+	}
 
-		if (backgroundSetting.isToggled()) {
+	private void worldStateEnd() {
 
-			float y1 = -before * LINE_H - 4f;
-			float y2 = after * LINE_H + 12f;
-
-			GlStateManager.disableTexture2D();
-
-			Tessellator tess = Tessellator.getInstance();
-			WorldRenderer wr = tess.getWorldRenderer();
-			wr.begin(7, DefaultVertexFormats.POSITION_COLOR);
-			wr.pos(-panelHalfW, y1, 0.0).color(0f, 0f, 0f, 0.35f).endVertex();
-			wr.pos(-panelHalfW, y2, 0.0).color(0f, 0f, 0f, 0.35f).endVertex();
-			wr.pos(panelHalfW, y2, 0.0).color(0f, 0f, 0f, 0.35f).endVertex();
-			wr.pos(panelHalfW, y1, 0.0).color(0f, 0f, 0f, 0.35f).endVertex();
-			tess.draw();
-
-			GlStateManager.enableTexture2D();
-		}
-
-		for (int i = first; i <= last; i++) {
-
-			LyricLine l = ls.get(i);
-			int d = i - cur;
-			boolean isCur = d == 0;
-
-			int alpha = isCur ? 255 : (int) (255f * Math.max(0.2f, 1f - 0.3f * Math.abs(d)));
-			int argb = (Math.max(alpha, 8) << 24) | (isCur ? curRgb : othRgb);
-			float fit = l.width > MAX_TEXT_W ? MAX_TEXT_W / l.width : 1f;
-			float s2 = (isCur ? 1.15f : 1f) * fit;
-
-			GlStateManager.pushMatrix();
-			GlStateManager.translate(0f, (d + slide) * LINE_H, 0f);
-			GlStateManager.scale(s2, s2, 1f);
-			font.drawString(l.text, -l.width / 2f, 0f, argb, shadow);
-			GlStateManager.popMatrix();
-		}
-
+		GlStateManager.enableCull();
 		GlStateManager.depthMask(true);
 		GlStateManager.enableDepth();
 		GlStateManager.disableBlend();
 		GlStateManager.color(1f, 1f, 1f, 1f);
+	}
+
+	@EventTarget
+	public void onRender3D(EventRender3D event) {
+
+		SpotifyBridge.Snapshot s = bridge.get();
+		List<LyricLine> ls = lyrics;
+		Entity view = mc.getRenderViewEntity();
+		TranslateText where = where();
+
+		if (s == null || mc.theWorld == null || view == null || mc.gameSettings.hideGUI || !fonts.isReady()
+				|| where == TranslateText.LYRICS_WHERE_SCREEN) {
+			return;
+		}
+
+		long now = System.nanoTime();
+		float pt = event.getPartialTicks();
+
+		float vYaw = view.prevRotationYaw + MathHelper.wrapAngleTo180_float(view.rotationYaw - view.prevRotationYaw) * pt;
+		float vPitch = view.prevRotationPitch + (view.rotationPitch - view.prevRotationPitch) * pt;
+		float dt = lastFrameNano == 0L ? 0f : Math.min(0.1f, (now - lastFrameNano) / 1.0E9f);
+		lastFrameNano = now;
+
+		// l'angolo "morbido" con cui le scritte seguono lo sguardo
+		if (!skyInit) {
+			skyYaw = vYaw;
+			skyInit = true;
+		} else {
+			skyYaw += MathHelper.wrapAngleTo180_float(vYaw - skyYaw) * (1f - (float) Math.exp(-4f * dt));
+		}
+
+		prepareColors(pt, view);
+
+		boolean stateSet = false;
+		float eye = view.getEyeHeight();
+
+		if (!ls.isEmpty()) {
+
+			double t = songTime(s, now);
+			advanceIndex(ls, t);
+			stateSet = drawLines(ls, t, vYaw, vPitch, eye, where == TranslateText.LYRICS_WHERE_SKY);
+		}
+
+		// scheda "now playing"
+		double since = (now - cardStartNano) / 1.0E9;
+
+		if (titleCardSetting.isToggled() && cardStartNano != 0L && since < CARD_SECS) {
+
+			if (!stateSet) {
+				worldState();
+				stateSet = true;
+			}
+
+			drawCard(s, since, vPitch, eye);
+		}
+
+		if (stateSet) {
+			worldStateEnd();
+		}
+	}
+
+	private void spawn(Placement p, int idx) {
+
+		p.idx = idx;
+
+		float sign = (idx & 1) == 0 ? 1f : -1f;
+		p.yawRel = sign * (0.25f + 0.75f * rand()) * spreadSetting.getValueFloat();
+		p.yawAbs = skyYaw + p.yawRel;
+		p.elev = heightSetting.getValueFloat() + ((idx & 1) == 0 ? 3f : -4f) + (rand() - 0.5f) * 8f;
+		p.dist = distanceSetting.getValueFloat() * (0.85f + 0.3f * rand());
+		p.roll = (rand() - 0.5f) * 2f * tiltSetting.getValueFloat();
+		p.size = 0.9f + 0.35f * rand();
+	}
+
+	/** Disegna le righe visibili. Ritorna true se ha attivato lo stato GL (da ripristinare dal chiamante). */
+	private boolean drawLines(List<LyricLine> ls, double t, float vYaw, float vPitch, float eye, boolean sky) {
+
+		int n = ls.size();
+		int lo = Math.max(0, lineIndex - (sky ? linesSetting.getValueInt() : 2) + 1);
+		int hi = Math.min(n - 1, lineIndex + 1);
+		float fadeMs = fadeSetting.getValueFloat() * 1000f;
+
+		boolean reveal = showSetting.getOption().getTranslate() == TranslateText.LYRICS_SHOW_WORD;
+		boolean curved = sky && curveSetting.isToggled();
+		boolean follow = followSetting.isToggled();
+		boolean shadow = shadowSetting.isToggled();
+		float userScale = scaleSetting.getValueFloat();
+		float rowLimit = sky ? ROW_LIMIT_SKY : ROW_LIMIT_FLOAT;
+		float rowH = fonts.height(LyricFonts.BIG) * 1.12f;
+
+		boolean stateSet = false;
+
+		for (int i = lo; i <= hi; i++) {
+
+			LyricLine l = ls.get(i);
+			long start = l.timeMs;
+			long span = WordAnim.spanOf(ls, i);
+			double spanEnd = start + span;
+
+			if (t < start - 250.0 || t > spanEnd + fadeMs) {
+				continue;
+			}
+
+			float yawC, elev, dist, roll, size;
+
+			if (sky) {
+
+				Placement p = placements[i & 15];
+
+				if (p.idx != i) {
+					spawn(p, i);
+				}
+
+				yawC = follow ? skyYaw + p.yawRel : p.yawAbs;
+				elev = p.elev;
+				dist = p.dist;
+				roll = p.roll;
+				size = p.size;
+
+				// fuori dal campo visivo: non disegniamo nulla
+				if (Math.abs(MathHelper.wrapAngleTo180_float(yawC - vYaw)) > 110f) {
+					continue;
+				}
+			} else {
+				// Floating: attaccato allo sguardo, poco sopra il mirino
+				yawC = vYaw;
+				elev = -vPitch + 6f;
+				dist = 7f;
+				roll = 0f;
+				size = 1f;
+			}
+
+			float fadeIn = WordAnim.clamp01((float) ((t - (start - 250.0)) / 350.0));
+			float fo = t > spanEnd ? WordAnim.clamp01((float) ((t - spanEnd) / fadeMs)) : 0f;
+			float alpha = (1f - (1f - fadeIn) * (1f - fadeIn)) * (1f - fo * fo);
+
+			if (alpha < 0.01f) {
+				continue;
+			}
+
+			// entrata con un piccolo rimbalzo, poi la riga rimpicciolisce
+			float c1 = 1.70158f, c3 = c1 + 1f, f1 = fadeIn - 1f;
+			float life = (1f + c3 * f1 * f1 * f1 + c1 * f1 * f1) * (1f - 0.3f * fo);
+
+			l.prepare(fonts, rowLimit);
+
+			float fit = l.maxRowW > rowLimit * 1.35f ? rowLimit * 1.35f / l.maxRowW : 1f;
+			float s = WORLD_PER_PX * userScale * (sky ? 1f : 0.45f) * size * life * fit;
+			float stackY = sky ? 0f : (i - lineIndex) * (l.rows + 0.35f) * rowH;
+
+			if (!stateSet) {
+				worldState();
+				stateSet = true;
+			}
+
+			drawLine3D(l, t, start, span, alpha, s, yawC, elev, dist, eye, roll, stackY, rowH, curved, reveal, shadow);
+		}
+
+		return stateSet;
+	}
+
+	private void drawLine3D(LyricLine l, double t, long start, double span, float alpha, float s, float yawC, float elev,
+			float dist, float eye, float roll, float stackY, float rowH, boolean curved, boolean reveal, boolean shadow) {
+
+		int nW = l.words.length;
+		int curWord = WordAnim.currentWord(l, (t - start) / span);
+		float tanRoll = (float) Math.tan(Math.toRadians(roll));
+		float half = l.maxRowW / 2f;
+
+		Tessellator tess = Tessellator.getInstance();
+		WorldRenderer wr = tess.getWorldRenderer();
+
+		if (!curved) {
+			SkyMath.flat(pos, yawC, elev, dist, eye);
+			GlStateManager.pushMatrix();
+			GlStateManager.translate(pos[0], pos[1], pos[2]);
+			GlStateManager.rotate(-yawC, 0f, 1f, 0f);
+			GlStateManager.rotate(-elev, 1f, 0f, 0f);
+			GlStateManager.rotate(roll, 0f, 0f, 1f);
+			GlStateManager.scale(-s, -s, s);
+		}
+
+		for (int k = 0; k < nW; k++) {
+
+			anim.compute(l, k, t, start, span, curWord, reveal);
+
+			if (anim.vis <= 0.01f) {
+				continue;
+			}
+
+			LyricFonts.Word w = l.bigWords[k];
+			int row = l.bigRow[k];
+			float cx = -l.rowW[row] / 2f + l.bigX[k] + w.adv / 2f;
+			float cy = (row - (l.rows - 1) / 2f) * rowH + stackY;
+
+			float e = anim.emph * anim.emph * (3f - 2f * anim.emph);
+			float sc = (0.7f + 0.3f * anim.vis) * (1f + 0.32f * e);
+			float fl = WordAnim.clamp01((cx - w.adv / 2f + half) / l.maxRowW);
+			float fr = WordAnim.clamp01((cx + w.adv / 2f + half) / l.maxRowW);
+
+			gradColor(cl, fl, anim.mix, 0.28f * e);
+			gradColor(cr, fr, anim.mix, 0.28f * e);
+
+			float a = alpha * anim.vis * (0.78f + 0.22f * anim.mix);
+			float qx = cx, qy = cy;
+
+			if (curved) {
+				// ogni parola sta sulla cupola, di fronte al centro: la riga appare curva
+				SkyMath.curved(pos, yawC, elev, dist, cx, cy, s, tanRoll, eye);
+				GlStateManager.pushMatrix();
+				GlStateManager.translate(pos[0], pos[1], pos[2]);
+				GlStateManager.rotate(-pos[3], 0f, 1f, 0f);
+				GlStateManager.rotate(-elev, 1f, 0f, 0f);
+				GlStateManager.rotate(roll, 0f, 0f, 1f);
+				GlStateManager.scale(-s, -s, s);
+				qx = 0f;
+				qy = 0f;
+			}
+
+			drawWord(tess, wr, w, qx, qy, sc, cl, cr, a, shadow);
+
+			if (curved) {
+				GlStateManager.popMatrix();
+			}
+		}
+
+		if (!curved) {
+			GlStateManager.popMatrix();
+		}
+	}
+
+	/** Scheda "NOW PLAYING / titolo / artista" con due filetti, attaccata allo sguardo. */
+	private void drawCard(SpotifyBridge.Snapshot s, double since, float vPitch, float eye) {
+
+		float a = (float) Math.min(1.0, since / 0.5) * (float) Math.min(1.0, (CARD_SECS - since) / 1.0);
+
+		if (a <= 0.01f) {
+			return;
+		}
+
+		LyricFonts.Word wn = fonts.get(LyricFonts.BIG, "NOW PLAYING");
+		LyricFonts.Word wt = fonts.get(LyricFonts.BIG, s.title);
+		LyricFonts.Word wa = fonts.get(LyricFonts.BIG, s.artist);
+
+		float sc = WORLD_PER_PX * scaleSetting.getValueFloat() * 0.5f;
+		float elev = -vPitch + 8f;
+		float fitT = Math.min(1f, 760f / wt.adv);
+		float fitA = Math.min(1f, 520f / wa.adv);
+		float rule = Math.max(wt.adv * fitT / 2f + 24f, 140f);
+
+		SkyMath.flat(pos, skyYaw, elev, 7f, eye);
+		GlStateManager.pushMatrix();
+		GlStateManager.translate(pos[0], pos[1], pos[2]);
+		GlStateManager.rotate(-skyYaw, 0f, 1f, 0f);
+		GlStateManager.rotate(-elev, 1f, 0f, 0f);
+		GlStateManager.scale(-sc, -sc, sc);
+
+		// filetti sopra e sotto
+		Tessellator tess = Tessellator.getInstance();
+		WorldRenderer wr = tess.getWorldRenderer();
+		GlStateManager.disableTexture2D();
+		wr.begin(7, DefaultVertexFormats.POSITION_COLOR);
+
+		for (int i = 0; i < 2; i++) {
+			float y0 = i == 0 ? -66f : 70f;
+			wr.pos(-rule, y0, 0.0).color(gs[0], gs[1], gs[2], a * 0.55f).endVertex();
+			wr.pos(-rule, y0 + 1.6f, 0.0).color(gs[0], gs[1], gs[2], a * 0.55f).endVertex();
+			wr.pos(rule, y0 + 1.6f, 0.0).color(ge[0], ge[1], ge[2], a * 0.55f).endVertex();
+			wr.pos(rule, y0, 0.0).color(ge[0], ge[1], ge[2], a * 0.55f).endVertex();
+		}
+
+		tess.draw();
+		GlStateManager.enableTexture2D();
+
+		boolean shadow = shadowSetting.isToggled();
+
+		drawWord(tess, wr, wn, 0f, -42f, 0.34f, un, un, a * 0.75f, shadow);
+
+		cl[0] = gs[0]; cl[1] = gs[1]; cl[2] = gs[2];
+		cr[0] = ge[0]; cr[1] = ge[1]; cr[2] = ge[2];
+		drawWord(tess, wr, wt, 0f, 2f, fitT, cl, cr, a, shadow);
+
+		cl[0] = cr[0] = 1f; cl[1] = cr[1] = 1f; cl[2] = cr[2] = 1f;
+		drawWord(tess, wr, wa, 0f, 46f, 0.55f * fitA, cl, cr, a * 0.85f, shadow);
+
 		GlStateManager.popMatrix();
 	}
 
-	// ------------------------------------------------------------------ barra karaoke in alto
+	// ------------------------------------------------------------------ rendering 2D (barra e sottotitoli)
 
 	@EventTarget
 	public void onRender2D(EventRender2D event) {
 
-		if (!barSetting.isToggled() || !fonts.isReady()) {
+		if (!fonts.isReady() || mc.gameSettings.hideGUI) {
+			return;
+		}
+
+		boolean screen = where() == TranslateText.LYRICS_WHERE_SCREEN;
+
+		if (!barSetting.isToggled() && !screen) {
 			return;
 		}
 
 		SpotifyBridge.Snapshot s = bridge.get();
 		List<LyricLine> ls = lyrics;
 
-		if (s == null || ls.isEmpty() || mc.gameSettings.hideGUI) {
+		if (s == null || ls.isEmpty()) {
 			return;
 		}
 
 		long now = System.nanoTime();
 		double t = songTime(s, now);
 		int cur = advanceIndex(ls, t);
-		int shown = Math.max(cur, 0);
-
-		LyricLine l = ls.get(shown);
-		l.ensureWords();
-		LyricLine nx = shown + 1 < ls.size() ? ls.get(shown + 1) : null;
-
-		if (nx != null) {
-			nx.ensureWords();
-		}
 
 		if (scaled == null || lastDW != mc.displayWidth || lastDH != mc.displayHeight || lastGui != mc.gameSettings.guiScale) {
 			scaled = new ScaledResolution(mc);
 			lastDW = mc.displayWidth;
 			lastDH = mc.displayHeight;
 			lastGui = mc.gameSettings.guiScale;
+		}
+
+		if (screen && mc.theWorld != null) {
+			prepareColors(event.getPartialTicks(), mc.getRenderViewEntity() != null ? mc.getRenderViewEntity() : mc.thePlayer);
+			drawScreen(ls, t, cur);
+		}
+
+		if (barSetting.isToggled()) {
+			drawBar(s, ls, t, cur, now);
+		}
+	}
+
+	/** Sottotitoli: la riga corrente, centrata in basso. */
+	private void drawScreen(List<LyricLine> ls, double t, int cur) {
+
+		if (cur < 0) {
+			return;
+		}
+
+		LyricLine l = ls.get(cur);
+		long start = l.timeMs;
+		long span = WordAnim.spanOf(ls, cur);
+		double spanEnd = start + span;
+
+		if (t > spanEnd + 700.0) {
+			return;
+		}
+
+		float ts = 10f * scaleSetting.getValueFloat() / fonts.height(LyricFonts.BIG);
+		float sw = scaled.getScaledWidth(), sh = scaled.getScaledHeight();
+		float rowH = fonts.height(LyricFonts.BIG) * 1.12f;
+
+		l.prepare(fonts, sw * 0.7f / ts);
+
+		float alpha = WordAnim.clamp01((float) ((spanEnd + 700.0 - t) / 300.0));
+		boolean reveal = showSetting.getOption().getTranslate() == TranslateText.LYRICS_SHOW_WORD;
+		boolean shadow = shadowSetting.isToggled();
+		int curWord = WordAnim.currentWord(l, (t - start) / (double) span);
+		float half = l.maxRowW / 2f;
+		float centerY = sh - 86f;
+
+		GlStateManager.enableBlend();
+		GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0);
+		GlStateManager.enableTexture2D();
+
+		Tessellator tess = Tessellator.getInstance();
+		WorldRenderer wr = tess.getWorldRenderer();
+
+		for (int k = 0; k < l.words.length; k++) {
+
+			anim.compute(l, k, t, start, span, curWord, reveal);
+
+			if (anim.vis <= 0.01f) {
+				continue;
+			}
+
+			LyricFonts.Word w = l.bigWords[k];
+			int row = l.bigRow[k];
+			float cx = -l.rowW[row] / 2f + l.bigX[k] + w.adv / 2f;
+			float cy = (row - (l.rows - 1) / 2f) * rowH;
+
+			float e = anim.emph * anim.emph * (3f - 2f * anim.emph);
+			float sc = (0.7f + 0.3f * anim.vis) * (1f + 0.25f * e) * ts;
+
+			gradColor(cl, WordAnim.clamp01((cx - w.adv / 2f + half) / l.maxRowW), anim.mix, 0.28f * e);
+			gradColor(cr, WordAnim.clamp01((cx + w.adv / 2f + half) / l.maxRowW), anim.mix, 0.28f * e);
+
+			drawWord(tess, wr, w, sw / 2f + cx * ts, centerY + cy * ts, sc, cl, cr, alpha * anim.vis * (0.78f + 0.22f * anim.mix), shadow);
+		}
+
+		GlStateManager.color(1f, 1f, 1f, 1f);
+	}
+
+	private void drawBar(SpotifyBridge.Snapshot s, List<LyricLine> ls, double t, int cur, long now) {
+
+		int shown = Math.max(cur, 0);
+		LyricLine l = ls.get(shown);
+		l.ensureWords();
+		LyricLine nx = shown + 1 < ls.size() ? ls.get(shown + 1) : null;
+
+		if (nx != null) {
+			nx.ensureWords();
 		}
 
 		final float W = 270f, H = 17f, Y = 5f;
@@ -795,30 +913,30 @@ public class LyricsSkyMod extends Mod {
 
 		int nc = Math.min(l.words.length, 40);
 		int nn = nx == null ? 0 : Math.min(nx.words.length, 24);
-		float pos = 0f;
+		float p = 0f;
 
 		for (int k = 0; k < nc; k++) {
 			LyricFonts.Word w = fonts.get(LyricFonts.SMALL, l.words[k]);
 			barWords[k] = w;
-			barX[k] = pos;
-			pos += w.adv * ts + space;
+			barX[k] = p;
+			p += w.adv * ts + space;
 		}
 
-		pos += 12f;
+		p += 12f;
 
 		for (int k = 0; k < nn; k++) {
 			LyricFonts.Word w = fonts.get(LyricFonts.SMALL, nx.words[k]);
 			barWords[nc + k] = w;
-			barX[nc + k] = pos;
-			pos += w.adv * ts + space;
+			barX[nc + k] = p;
+			p += w.adv * ts + space;
 		}
 
-		int curWord = cur < 0 ? -1 : currentWord(l, (t - l.timeMs) / (double) spanOf(ls, shown));
+		int curWord = cur < 0 ? -1 : WordAnim.currentWord(l, (t - l.timeMs) / (double) WordAnim.spanOf(ls, shown));
 		float target = 0f;
 
 		if (curWord >= 0 && curWord < nc) {
 			float center = barX[curWord] + barWords[curWord].adv * ts / 2f;
-			target = Math.max(0f, Math.min(center - stripW / 2f, pos - stripW));
+			target = Math.max(0f, Math.min(center - stripW / 2f, p - stripW));
 		}
 
 		barScroll += (target - barScroll) * (1f - (float) Math.exp(-10f * dt));
